@@ -1,0 +1,16 @@
+[package]
+name = "mcp9600"
+version = "0.1.0"
+description = "A driver for the MCP9600 thermocouple reader"
+authors = ["Andrew Mark <andrewemark@gmail.com>"]
+categories = ["embedded", "hardware-support", "no-std"]
+edition = "2018"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+embedded-hal = "0.2.4"
+fixed = "1.8.0"
+
+[dev-dependencies]
+embedded-hal-mock = "0.7.2"
