@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), no_std)]
+
 use embedded_hal::blocking::i2c;
 use fixed::types::I12F4;
 
@@ -25,16 +27,16 @@ impl Address {
             Err(Mcp9600Error::Address)
         } else {
             // The address byte, when later transmitted with a command, must have
-            // bits 6 and 7 set (p17 of datasheet).
+            // bits 5 and 6 set (p17 of datasheet).
             Ok(Self(0x60 | address))
         }
     }
 }
 
-pub struct Register<const R: usize> {
+pub struct Register<const R: usize, const W: usize> {
     reg_addr: u8,
 }
-impl<const R: usize> Register<R> {
+impl<const R: usize, const W: usize> Register<R, W> {
     fn read<I>(&self, mcp: &mut MCP9600<I>) -> MCP9600Result<[u8; R]>
     where
         I: i2c::Write + i2c::Read,
@@ -61,14 +63,17 @@ impl<const R: usize> Register<R> {
         Ok(rx_buf)
     }
 
-    // There are cases where we need to write two bytes to a register.
-    // Is this possible with const generics?
-    // We would write [self.address, data[1], data[0]] to the i2c bus
-    fn write<I>(&self, mcp: &mut MCP9600<I>, data: u8) -> MCP9600Result<()>
+    fn write<I>(&self, mcp: &mut MCP9600<I>, data: [u8; R]) -> MCP9600Result<()>
     where
         I: i2c::Write + i2c::Read,
     {
-        let tx_buf = [self.reg_addr, data];
+        // Pack data into tx buf for sending as big endian
+        let mut tx_buf = [0u8; W];
+        tx_buf[0] = self.reg_addr;
+        for (tx_byte, &data_byte) in tx_buf[1..].iter_mut().zip(data.iter().rev()) {
+            *tx_byte = data_byte
+        }
+
         mcp.i2c
             .write(mcp.address.0, &tx_buf)
             .map_err(|_| Mcp9600Error::Write)?;
@@ -76,33 +81,34 @@ impl<const R: usize> Register<R> {
     }
 }
 
-// pub struct MCP9600DoubleByteRegister {
-//     address: u8,
-// }
-// impl MCP9600DoubleByteRegister {
-//     fn write<I: i2c::Write + i2c::Read>(
-//         &self,
-//         mcp: &mut MCP9600<I>,
-//         data: [u8; 2],
-//     ) -> MCP9600Result<()> {
-//         // MSB goes out first; Big Endian for transmission
-//         let tx_buf = [self.address, data[1], data[0]];
-//         mcp.i2c
-//             .write(mcp.address.0, &tx_buf)
-//             .map_err(|_| Mcp9600Error::Write)?;
-//         Ok(())
-//     }
-// }
+// TOOD: use typestates to encode which register are read, write, read/write and catch issues
+// at compile time
 
-const THERMOCOUPLE_CONFIG_REG: Register<1> = Register {
-    reg_addr: 0b0000_0101,
-};
-const HOT_JUNCTION_TEMP_REG: Register<2> = Register {
-    reg_addr: 0b0000_0000,
-};
-const DELTA_TEMP_REG: Register<2> = Register {
-    reg_addr: 0b0000_0001,
-};
+const THERMOCOUPLE_TEMP_REG: Register<2, 3> = Register { reg_addr: 0x00 };
+const JUNCTIONS_TEMP_DELTA_REG: Register<2, 3> = Register { reg_addr: 0x01 };
+const COLD_JUNCTION_TEMP_REG: Register<2, 3> = Register { reg_addr: 0x02 };
+const RAW_ADC_DATA_REG: Register<3, 4> = Register { reg_addr: 0x03 };
+
+const STATUS_REG: Register<1, 2> = Register { reg_addr: 0x04 };
+const THERMOCOUPLE_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x05 };
+const DEVICE_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x06 };
+
+const ALERT_1_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x08 };
+const ALERT_2_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x09 };
+const ALERT_3_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x0A };
+const ALERT_4_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x0B };
+
+const ALERT_1_HYSTERESIS_REG: Register<1, 2> = Register { reg_addr: 0x0C };
+const ALERT_2_HYSTERESIS_REG: Register<1, 2> = Register { reg_addr: 0x0D };
+const ALERT_3_HYSTERESIS_REG: Register<1, 2> = Register { reg_addr: 0x0E };
+const ALERT_4_HYSTERESIS_REG: Register<1, 2> = Register { reg_addr: 0x0F };
+
+const ALERT_1_LIMIT_REG: Register<2, 3> = Register { reg_addr: 0x10 };
+const ALERT_2_LIMIT_REG: Register<2, 3> = Register { reg_addr: 0x11 };
+const ALERT_3_LIMIT_REG: Register<2, 3> = Register { reg_addr: 0x12 };
+const ALERT_4_LIMIT_REG: Register<2, 3> = Register { reg_addr: 0x13 };
+
+const DEVICE_INFO_REG: Register<2, 3> = Register { reg_addr: 0x20 };
 
 /// Thermocouple type
 #[repr(u8)]
@@ -148,17 +154,17 @@ where
 
     /// Reads the thermocouple temperature in degrees Celsius.
     ///
-    /// This temperature is at the so-called hot junction. This temperature is cold-junction
-    /// compensated and error-corrected.
+    /// This temperature is at the so-called hot junction (using the thermocouple).
+    /// This temperature is cold-junction compensated and error-corrected.
     pub fn temperature(&mut self) -> MCP9600Result<I12F4> {
-        let rx_buf = HOT_JUNCTION_TEMP_REG.read(self)?;
+        let rx_buf = THERMOCOUPLE_TEMP_REG.read(self)?;
         let temperature = I12F4::from_be_bytes(rx_buf);
         Ok(temperature)
     }
 
     /// Reads the thermocouple temperature in degrees Celsius without cold-junction compensation
     pub fn temperature_delta(&mut self) -> MCP9600Result<I12F4> {
-        let rx_buf = DELTA_TEMP_REG.read(self)?;
+        let rx_buf = JUNCTIONS_TEMP_DELTA_REG.read(self)?;
         let temperature = I12F4::from_be_bytes(rx_buf);
         Ok(temperature)
     }
@@ -182,14 +188,16 @@ where
         if let Some(fset) = filter_setting {
             util::set_ls_nibble(&mut config, fset as u8)
         }
-        THERMOCOUPLE_CONFIG_REG.write(self, config)?;
+        THERMOCOUPLE_CONFIG_REG.write(self, [config; 1])?;
         Ok(())
     }
 
+    /// Reads the sensor's thermocouple configuration register
     fn thermocouple_configuration(&mut self) -> MCP9600Result<u8> {
         Ok(THERMOCOUPLE_CONFIG_REG.read(self)?[0])
     }
 
+    /// Destroys driver and releases i2c bus
     pub fn destroy(self) -> I {
         self.i2c
     }
