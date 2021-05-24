@@ -1,9 +1,12 @@
 #![cfg_attr(not(test), no_std)]
 
+use crate::traits::{ReadOnly, ReadWrite, ReadWriteState};
 use core::convert::TryFrom;
+use core::marker::PhantomData;
 use embedded_hal::blocking::i2c;
 use fixed::types::I12F4;
 
+mod traits;
 mod util;
 
 pub type MCP9600Result<T> = Result<T, Mcp9600Error>;
@@ -37,15 +40,23 @@ impl Address {
     }
 }
 
-struct Register<const R: usize, const W: usize> {
+/// Generic register to access on the MCP9600
+///
+/// Notice that the T type parameter represents a type of register, either a read-only register,
+/// or a read/write register.
+struct Register<T: ReadWriteState, const R: usize, const W: usize> {
     reg_addr: u8,
+    _ts: PhantomData<T>,
 }
-impl<const R: usize, const W: usize> Register<R, W> {
-    fn read<I>(&self, mcp: &mut MCP9600<I>) -> MCP9600Result<[u8; R]>
-    where
-        I: i2c::Write + i2c::Read,
-    {
-        let tx_buf = [self.reg_addr];
+
+type SingleByteRegister<T> = Register<T, 1, 2>;
+type DoubleByteRegister<T> = Register<T, 2, 3>;
+
+trait Readable<I: i2c::Read + i2c::Write, const R: usize> {
+    fn address(&self) -> u8;
+
+    fn read(&self, mcp: &mut MCP9600<I>) -> MCP9600Result<[u8; R]> {
+        let tx_buf = [self.address()];
         let mut rx_buf = [0u8; R];
 
         // See MCP9600 errata document for why we must retry
@@ -55,7 +66,6 @@ impl<const R: usize, const W: usize> Register<R, W> {
                 .map_err(|_| Mcp9600Error::Write)?;
 
             if let Err(_) = mcp.i2c.read(mcp.address.0, &mut rx_buf) {
-                //defmt::warn!("Read failed! Try number: {}", i);
                 if i == NUM_RETRIES {
                     return Err(Mcp9600Error::OutOfRetries);
                 }
@@ -66,14 +76,15 @@ impl<const R: usize, const W: usize> Register<R, W> {
         }
         Ok(rx_buf)
     }
+}
 
-    fn write<I>(&self, mcp: &mut MCP9600<I>, data: [u8; R]) -> MCP9600Result<()>
-    where
-        I: i2c::Write + i2c::Read,
-    {
+trait Writeable<I: i2c::Read + i2c::Write, const R: usize, const W: usize> {
+    fn address(&self) -> u8;
+
+    fn write(&self, mcp: &mut MCP9600<I>, data: [u8; R]) -> MCP9600Result<()> {
         // Pack data into tx buf for sending
         let mut tx_buf = [0u8; W];
-        tx_buf[0] = self.reg_addr;
+        tx_buf[0] = self.address();
         for (tx_byte, &data_byte) in tx_buf[1..].iter_mut().zip(data.iter()) {
             *tx_byte = data_byte
         }
@@ -85,15 +96,51 @@ impl<const R: usize, const W: usize> Register<R, W> {
     }
 }
 
-// TOOD: use typestates to encode which register are read, write, read/write
+impl<I: i2c::Read + i2c::Write, const R: usize, const W: usize> Readable<I, R>
+    for Register<ReadOnly, R, W>
+{
+    fn address(&self) -> u8 {
+        self.reg_addr
+    }
+}
 
-const THERMOCOUPLE_TEMP_REG: Register<2, 3> = Register { reg_addr: 0x00 };
-const JUNCTIONS_TEMP_DELTA_REG: Register<2, 3> = Register { reg_addr: 0x01 };
-const COLD_JUNCTION_TEMP_REG: Register<2, 3> = Register { reg_addr: 0x02 };
+impl<I: i2c::Read + i2c::Write, const R: usize, const W: usize> Readable<I, R>
+    for Register<ReadWrite, R, W>
+{
+    fn address(&self) -> u8 {
+        self.reg_addr
+    }
+}
+
+impl<I: i2c::Read + i2c::Write, const R: usize, const W: usize> Writeable<I, R, W>
+    for Register<ReadWrite, R, W>
+{
+    fn address(&self) -> u8 {
+        self.reg_addr
+    }
+}
+
+const THERMOCOUPLE_TEMP_REG: DoubleByteRegister<ReadOnly> = Register {
+    reg_addr: 0x00,
+    _ts: PhantomData,
+};
+const JUNCTIONS_TEMP_DELTA_REG: DoubleByteRegister<ReadOnly> = Register {
+    reg_addr: 0x01,
+    _ts: PhantomData,
+};
+const COLD_JUNCTION_TEMP_REG: DoubleByteRegister<ReadOnly> = Register {
+    reg_addr: 0x02,
+    _ts: PhantomData,
+};
+
 // const RAW_ADC_DATA_REG: Register<3, 4> = Register { reg_addr: 0x03 };
-
 // const STATUS_REG: Register<1, 2> = Register { reg_addr: 0x04 };
-const THERMOCOUPLE_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x05 };
+
+const THERMOCOUPLE_CONFIG_REG: SingleByteRegister<ReadWrite> = Register {
+    reg_addr: 0x05,
+    _ts: PhantomData,
+};
+
 // const DEVICE_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x06 };
 
 // const ALERT_1_CONFIG_REG: Register<1, 2> = Register { reg_addr: 0x08 };
